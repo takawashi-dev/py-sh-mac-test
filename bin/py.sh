@@ -21,19 +21,37 @@
 #
 # Environment:
 #   PYTHONUTF8 が未設定なら 1 にする (= Windows Git Bash で日本語出力が cp932 になり文字化けするのを防ぐ)。
+#   PD_FORGE_PY_CACHE: 見つけた Python を覚えるファイル (既定 ~/.cache/pd-forge/py-sh.tsv)。
+#
+# Cache:
+#   見つけた Python の実行ファイルの場所を、そのときの PATH と組にして覚える。次から同じ PATH なら
+#   確かめずにそのまま使う (= Windows では確かめるだけで 1 回 0.1 秒以上かかる。hook から呼ぶため)。
+#   PATH が変わったら (= venv など) 探し直す。覚えるのは新しい 10 組まで。
 #
 # Adding new candidate:
-#   下記 CANDIDATES array に追加する。"py" だけは `-3` を付けて呼ぶ。
+#   下記 CANDIDATES に追加する。"py" だけは `-3` を付けて呼ぶ。
 set -e
 
 shopt -s nullglob
 
-# Candidate python executables (priority order)
-CANDIDATES=(
-    "python3"                                                    # PATH-resolved (= Mac/Linux 大多数)
-    "python"                                                     # PATH-resolved (= Windows python.org installer)
-    "py"                                                         # Windows py launcher (= `-3` を付けて呼ぶ)
-)
+export PYTHONUTF8="${PYTHONUTF8:-1}"
+CACHE="${PD_FORGE_PY_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/pd-forge/py-sh.tsv}"
+
+# 前回、同じ PATH で見つけた Python があれば、それを使う。
+# exec はループの外で行う (= ループの中だと標準入力がキャッシュのファイルになり、hook が JSON を読めない)
+found=""
+if [ -r "$CACHE" ]; then
+    while IFS=$'\t' read -r exe path; do
+        if [ "$path" = "$PATH" ] && [ -x "$exe" ]; then found="$exe"; break; fi
+    done < "$CACHE"
+fi
+[ -n "$found" ] && exec "$found" "$@"
+
+# 試す順。Windows (= Git Bash) は python.org の Python に python3 が無く、python3 が Store の入口なので python を先にする
+case "${OSTYPE:-}" in
+    msys*|cygwin*|win32*) CANDIDATES=("python" "py" "python3") ;;
+    *)                    CANDIDATES=("python3" "python" "py") ;;
+esac
 # Windows python.org installer (= 新しい版を先に)
 _win=()
 for p in "${LOCALAPPDATA:-}"/Programs/Python/Python3*/python.exe "/c/Program Files/Python3"*/python.exe; do
@@ -49,9 +67,8 @@ CANDIDATES+=(
     "/usr/bin/python3"                                           # Linux apt / Mac system
 )
 
-export PYTHONUTF8="${PYTHONUTF8:-1}"
-
-CHECK='import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)'
+# 動いて Python 3 なら、実行ファイルの場所を出す (= Store の入口と Python 2 は失敗する)
+PROBE='import sys; print(sys.executable) if sys.version_info[0] == 3 else sys.exit(1)'
 
 for c in "${CANDIDATES[@]}"; do
     if [[ "$c" != */* ]]; then
@@ -59,14 +76,21 @@ for c in "${CANDIDATES[@]}"; do
     else
         [ -x "$c" ] || continue
     fi
-    if [ "$c" = "py" ]; then
-        if "$c" -3 -c "$CHECK" >/dev/null 2>&1; then
-            exec "$c" -3 "$@"
+    flag=()
+    [ "$c" = "py" ] && flag=(-3)
+    if exe="$("$c" "${flag[@]}" -c "$PROBE" 2>/dev/null)"; then
+        exe="${exe%$'\r'}"
+        case "${OSTYPE:-}" in
+            msys*|cygwin*|win32*) command -v cygpath >/dev/null 2>&1 && exe="$(cygpath -u "$exe")" ;;
+        esac
+        if [ -n "$exe" ] && [ -x "$exe" ]; then
+            # 覚える (= 新しい組を先頭に、古い組は 9 つまで。書けなくても止めない)
+            { mkdir -p "${CACHE%/*}" \
+                && { printf '%s\t%s\n' "$exe" "$PATH"; if [ -r "$CACHE" ]; then head -n 9 "$CACHE"; fi; } > "$CACHE.$$" \
+                && mv -f "$CACHE.$$" "$CACHE"; } 2>/dev/null || rm -f "$CACHE.$$" 2>/dev/null || true
+            exec "$exe" "$@"
         fi
-    else
-        if "$c" -c "$CHECK" >/dev/null 2>&1; then
-            exec "$c" "$@"
-        fi
+        exec "$c" "${flag[@]}" "$@"
     fi
 done
 
