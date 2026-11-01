@@ -1,0 +1,32 @@
+name: mac-python-check
+
+# bin/py.sh が macOS で動くか、python で直接呼ぶ hook が macOS の標準の PATH で失敗するかを確かめる（一時的な試し）。
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    steps:
+      - name: clone と環境
+        run: |
+          git clone --depth=1 "https://github.com/${GITHUB_REPOSITORY}.git" repo
+          sw_vers
+          uname -m
+          /bin/bash --version | head -1
+          echo "runner の PATH: $PATH"
+          for c in python python3; do printf '%s: ' "$c"; command -v "$c" || echo "(無い)"; done
+          ls -l /usr/bin/python /usr/bin/python3 2>&1 || true
+      - name: Mac の標準の PATH（/usr/bin:/bin）だけで試す
+        working-directory: repo
+        run: env -i HOME="$HOME" PATH=/usr/bin:/bin /bin/bash check.sh
+      - name: Homebrew を足した PATH で試す
+        working-directory: repo
+        run: env -i HOME="$HOME" PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin /bin/bash check.sh
